@@ -23,7 +23,7 @@ module w90_berry
   !! *  YWVS07 = PRB 75, 195121 (2007)  (Kubo frequency-dependent conductivity)
   !! *  LVTS12 = PRB 85, 014435 (2012)  (orbital magnetization and AHC)
   !! *  CTVR06 = PRB 74, 024408 (2006)  (  "          "       )
-  !! *  IATS18 = arXiv:1804.04030 (2018) (nonlinear shift current)
+  !! *  IATS18 = PRB 97, 245143 (2018)  (nonlinear shift current)
   ! ---------------------------------------------------------------
   !
   ! * Undocumented, works for limited purposes only: 
