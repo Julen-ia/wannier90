@@ -1597,18 +1597,11 @@ module w90_berry
       enddo
     enddo
 
-    ! setup for frequency-related quantities
-    omega=real(kubo_freq_list(:),dp)
-    wmin=omega(1)
-    wmax=omega(kubo_nfreq)
-    wstep=omega(2)-omega(1)
-
     ! loop on initial and final bands
     do n=1,num_wann
       do m=1,num_wann
         ! cycle diagonal matrix elements and bands above the maximum
         if (n==m) cycle
-        if (eig(m)>kubo_eigval_max .or. eig(n)>kubo_eigval_max) cycle
           ! setup T=0 occupation factors
           occ_fac=(occ(n)-occ(m))
           if (abs(occ_fac)<1e-10)  cycle
@@ -1622,11 +1615,6 @@ module w90_berry
            else
             eta_smr=kubo_smr_fixed_en_width
            endif
-
-          ! restrict to energy window spanning [-sc_w_thr*eta_smr,+sc_w_thr*eta_smr] 
-          ! outside this range, the two delta functions are virtually zero 
-          if (  ((eig(n)-eig(m)+sc_w_thr*eta_smr<wmin).or.(eig(n)-eig(m)-sc_w_thr*eta_smr>wmax)) .and. & 
-                ((eig(m)-eig(n)+sc_w_thr*eta_smr<wmin).or.(eig(m)-eig(n)-sc_w_thr*eta_smr>wmax))   )  cycle
 
           ! first compute the two sums over intermediate states between AA_bar and HH_da_bar with D_h
           ! appearing in Eqs. (32) and (34) of IATS18  
@@ -1673,7 +1661,7 @@ module w90_berry
             enddo ! bc
           enddo ! a
 
-          sc_k_list(:,:,1) = sc_k_list(:,:,1) + I_nm(:,:)
+          sc_k_list(:,:,1) = sc_k_list(:,:,1) + I_nm(:,:)*occ_fac
 
         enddo ! bands
       enddo ! bands
