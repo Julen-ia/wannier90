@@ -288,7 +288,6 @@ module w90_wan_ham
 
   end subroutine wham_get_occ_mat_list
 
-
   subroutine wham_get_deleig_a(deleig_a,eig,delHH_a,UU)
   !==========================!
   !                          !
@@ -385,6 +384,268 @@ module w90_wan_ham
     end if
     
   end subroutine wham_get_deleig_a
+
+
+
+  subroutine wham_get_deleig_a_b(deleig_a,eig,delHH_a,UU,mu_mass_ab,deldelHH_ab)
+  !==========================!
+  !                          !
+  !! Band derivatives dE/dk_a
+  !! and effective mass term 
+  !                          !
+  !==========================!
+
+    use w90_constants, only  : dp,cmplx_0,cmplx_i
+    use w90_utility, only    : utility_diagonalize,utility_rotate,&
+                               utility_rotate_diag
+    use w90_parameters, only : num_wann,use_degen_pert,degen_thr
+
+    ! Arguments
+    !
+    real(kind=dp),                    intent(out) :: deleig_a(num_wann,3)
+    real(kind=dp),                    intent(out) :: mu_mass_ab(num_wann,3,3)
+    real(kind=dp),                    intent(in)  :: eig(num_wann)
+    complex(kind=dp), dimension(:,:,:), intent(in)  :: delHH_a
+    complex(kind=dp), dimension(:,:,:,:), intent(in)  :: deldelHH_ab
+    complex(kind=dp), dimension(:,:), intent(in)  :: UU
+
+    ! Misc/Dummy
+    !
+    integer                       :: alpha,beta,i,degen_min,degen_max,dim,& 
+                                     j,degen_min_dk,degen_max_dk,dim_dk
+    real(kind=dp)                 :: diff, diff_de
+    complex(kind=dp), allocatable :: delHH_bar_a(:,:,:),deldelHH_bar_ab(:,:,:,:),U_deg(:,:)
+
+    integer, allocatable          :: deg_band_grad_list(:,:)
+    allocate(delHH_bar_a(num_wann,num_wann,3))
+    allocate(deldelHH_bar_ab(num_wann,num_wann,3,3))
+    allocate(U_deg(num_wann,num_wann))
+    ! this array contains information about degenerate band gradients
+    ! initialize all band indexes with 0 (the degenerate ones will be assigned 1
+    ! afterwards)
+    allocate(deg_band_grad_list(num_wann,3))
+    deg_band_grad_list(:,:) = 0 
+
+    ! loop on spatial index
+    do alpha=1,3    
+
+      if(use_degen_pert) then
+         
+         delHH_bar_a(:,:,alpha)=utility_rotate(delHH_a(:,:,alpha),UU,num_wann)
+         
+         ! Assuming that the energy eigenvalues are stored in eig(:) in
+         ! increasing order (diff >= 0)
+         
+         i=0
+         do 
+            i=i+1
+            if(i>num_wann) exit
+            if(i+1 <= num_wann) then
+               diff=eig(i+1)-eig(i)
+            else
+               !
+               ! i-th is the highest band, and it is non-degenerate
+               !
+               diff =degen_thr+1.0_dp
+            end if
+            if(diff<degen_thr) then
+               !
+               ! Bands i and i+1 are degenerate 
+               !
+               degen_min=i
+               degen_max=degen_min+1
+               !
+               ! See if any higher bands are in the same degenerate group
+               !
+               do
+                  if(degen_max+1>num_wann) exit
+                  diff=eig(degen_max+1)-eig(degen_max)
+                  if(diff<degen_thr) then
+                     degen_max=degen_max+1
+                  else
+                     exit
+                  end if
+               end do
+               !
+               ! Bands from degen_min to degen_max are degenerate. Diagonalize 
+               ! the submatrix in Eq.(31) YWVS07 over this degenerate subspace.
+               ! The eigenvalues are the band gradients
+               !
+               ! JULEN the below has been modified so that the new rotation matrix
+               ! corresponding to the degenerate subspace is directly icorporated
+               ! into the UU matrix. DID NOT CHECK THE REST OF THE U MATRIX IS NOT
+               ! AFFECTED
+               ! 
+               dim=degen_max-degen_min+1
+               call utility_diagonalize(delHH_bar_a(degen_min:degen_max,&
+                    degen_min:degen_max,alpha),dim,&
+                    deleig_a(degen_min:degen_max,alpha),U_deg(degen_min:degen_max,degen_min:degen_max))
+!                    deleig_a(degen_min:degen_max),U_deg(1:dim,1:dim))
+               !
+               ! Scanned bands up to degen_max
+               !
+               i=degen_max
+
+               !!!!!!!!!!!!!!!!!!!!!!!!!! 
+               ! JULEN
+               ! Hessian matrix
+               ! first, check if there are degeneracies among the band gradients
+               j=degen_min
+               do 
+                  j=j+1
+                  if(j>degen_max) exit
+                  if(j+1 <= degen_max) then
+                    diff_de = deleig_a(j+1,alpha)-deleig_a(j,alpha)
+                  else
+                  !
+                  ! j is the highest band in the first derivative degenerate subspace, and it is non-degenerate
+                  !
+                    diff_de =degen_thr+1.0_dp ! JULEN need to specify a different threshold?
+                  end if
+                  if(diff_de<degen_thr) then
+                     !
+                     ! Band gradients j and j+1 are degenerate 
+                     !
+                     degen_min_dk=j
+                     degen_max_dk=degen_min_dk+1
+                     !
+                     ! See if any higher bands are in the same degenerate group
+                     !
+                     do
+                        if(degen_max_dk+1>degen_max) exit
+                        diff_de=deleig_a(degen_max_dk+1)-deleig_a(degen_max_dk)
+                        if(diff_de<degen_thr) then
+                           degen_max_dk=degen_max_dk+1
+                        else
+                           exit
+                        end if
+                     end do
+           
+                     ! store information on indexes of degenerate band gradients
+                     ! into array
+                     deg_band_grad_list(degen_min_dk:degen_max_dk,alpha) = 1
+
+                     ! Scanned band gradients up to degen_max_dk
+                     j=degen_max_dk
+
+
+               !!!!!!!!!!!!!!!!!!!!!!!!!! 
+
+
+            else
+               !
+               ! Use non-degenerate form [Eq.(27) YWVS07] for current (i-th) band
+               !
+               deleig_a(i,alpha)=real(delHH_bar_a(i,i,alpha),dp)
+            end if
+         end do
+         
+      else
+         
+         ! Use non-degenerate form for all bands
+         !
+         deleig_a(:,alpha)=real(utility_rotate_diag(delHH_a(:,:,alpha),UU,num_wann),dp)
+
+      end if
+ 
+    end do ! spatial index for first derivative
+
+
+!    ! now compute the effective mass term
+!    ! loop on two spatial indexes
+!    
+!
+!    do i=1,num_wann
+!
+!     ! check if the band-gradients are degenerate
+!
+!     if (deg_band_grad_list(i).eq.0) then
+!     ! non-degenerate, compute Eq (28) of YWVS07 for band i
+! 
+!      
+! 
+!
+!     end if
+!    ! loop again for the effective mass term
+!                       ! Band gradients from degen_min_dk to degen_max_dk are degenerate. Diagonalize 
+!                   ! the submatrix in Eq.(28) YWVS07 with the n,n band indices replaced by 
+!                   ! mu,nu band indices corresponding to this degenerate subspace, see discussion below 
+!                   ! Eq (32)  YWVS07.
+!                   ! The eigenvalues are the second band gradients
+!                   !
+!                   !
+!                   dim_dk=degen_max_dk-degen_min_dk+1
+!                   call utility_diagonalize(delHH_bar_a(degen_min:degen_max,&
+!                        degen_min:degen_max),dim,&
+!                        deleig_a(degen_min:degen_max),U_deg(1:dim,1:dim))
+!                   !
+!    end do
+  
+    
+  end subroutine wham_get_deleig_a_b
+
+  subroutine wham_get_eig_deleig_massterm(kpt,eig,del_eig,HH,delHH,deldelHH,UU)
+    !! Given a k point, this function returns eigenvalues E,
+    !! derivatives of the eigenvalues dE/dk_a, 
+    !  and second derivatives of the eigenvalues d^{2}E/dk_a.dk_b 
+    !  using wham_get_deleig_a
+    !
+    use w90_parameters, only: num_wann
+    use w90_get_oper, only: HH_R, get_HH_R
+    use w90_postw90_common, only : pw90common_fourier_R_to_k
+    use w90_utility, only : utility_diagonalize
+
+    real(kind=dp), dimension(3), intent(in)         :: kpt
+    !! the three coordinates of the k point vector (in relative coordinates)
+    real(kind=dp), intent(out)                      :: eig(num_wann)
+    !! the calculated eigenvalues at kpt
+    real(kind=dp), intent(out)                      :: del_eig(num_wann,3)
+    !! the calculated derivatives of the eigenvalues at kpt [first component: band; second component: 1,2,3
+    !! for the derivatives along the three k directions]
+    real(kind=dp), intent(out)                      :: mu_mass(num_wann,3,3)
+    !! the calculated second derivatives of the eigenvalues at kpt [first component: band; second and
+    !! third components: 1,2,3
+    !! for the derivatives along the three k directions]
+
+    complex(kind=dp), dimension(:,:), intent(out)   :: HH
+    !! the Hamiltonian matrix at kpt
+    complex(kind=dp), dimension(:,:,:), intent(out) :: delHH
+    !! the delHH matrix (derivative of H) at kpt
+    complex(kind=dp), dimension(:,:,:,:), intent(out) :: deldelHH
+    !! the deldelHH matrix (second derivative of H) at kpt
+    complex(kind=dp), dimension(:,:), intent(out)   :: UU
+    !! the rotation matrix that gives the eigenvectors of HH
+
+    ! I call it to be sure that it has been called already once, 
+    ! and that HH_R contains the actual matrix. 
+    ! Further calls should return very fast.
+    call get_HH_R
+
+    call pw90common_fourier_R_to_k_new_second_d(kpt,HH_R,OO=HH,&
+                                                OO_da=delHH(:,:,:),&
+                                                OO_dadb=deldelHH(:,:,:,:))
+
+    call utility_diagonalize(HH,num_wann,eig,UU) 
+
+    ! JULEN just one call with all to calculate every spatial index, we need all
+    ! of them for computing the effective mass term
+    call wham_get_deleig_a_b(del_eig,eig,delHH,UU,mu_mass,deldelHH)
+
+
+
+!    call pw90common_fourier_R_to_k(kpt,HH_R,HH,0) 
+!    call utility_diagonalize(HH,num_wann,eig,UU) 
+!    call pw90common_fourier_R_to_k(kpt,HH_R,delHH(:,:,1),1) 
+!    call pw90common_fourier_R_to_k(kpt,HH_R,delHH(:,:,2),2) 
+!    call pw90common_fourier_R_to_k(kpt,HH_R,delHH(:,:,3),3) 
+!    call wham_get_deleig_a(del_eig(:,1),eig,delHH(:,:,1),UU)
+!    call wham_get_deleig_a(del_eig(:,2),eig,delHH(:,:,2),UU)
+!    call wham_get_deleig_a(del_eig(:,3),eig,delHH(:,:,3),UU)
+
+  end subroutine wham_get_eig_deleig_massterm
+
+
+
 
   subroutine wham_get_eig_deleig(kpt,eig,del_eig,HH,delHH,UU)
     !! Given a k point, this function returns eigenvalues E and

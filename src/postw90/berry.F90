@@ -116,6 +116,10 @@ module w90_berry
     ! shift current
     real(kind=dp), allocatable :: sc_k_list(:,:,:)
     real(kind=dp), allocatable :: sc_list(:,:,:)
+    ! jerk current
+    real(kind=dp), allocatable :: jerk_k_list(:,:,:,:,:)
+    real(kind=dp), allocatable :: jerk_list(:,:,:,:,:)
+
     ! Complex optical conductivity, dividided into Hermitean and
     ! anti-Hermitean parts
     !
@@ -143,7 +147,8 @@ module w90_berry
                          loop_xyz,loop_adpt,adpt_counter_list(nfermi),ifreq,&
                          file_unit
     character(len=24) :: file_name
-    logical           :: eval_ahc,eval_morb,eval_kubo,not_scannable, eval_sc
+    logical           :: eval_ahc,eval_morb,eval_kubo,not_scannable, eval_sc,& 
+                         eval_jerk     
 
     if(nfermi==0) call io_error(&
          'Must specify one or more Fermi levels when berry=true')
@@ -225,6 +230,17 @@ module w90_berry
        sc_k_list=0.0_dp 
        sc_list=0.0_dp 
     endif
+
+    if(eval_jerk) then
+       call get_HH_R 
+       call get_AA_R
+       allocate(jerk_k_list(3,3,3,3,kubo_nfreq))
+       allocate(jerk_list(3,3,3,3,kubo_nfreq))
+       jerk_k_list=0.0_dp 
+       jerk_list=0.0_dp 
+    endif
+
+
 
     if(on_root) then
 
@@ -1479,6 +1495,212 @@ module w90_berry
       enddo ! bands
 
   end subroutine berry_get_sc_klist
+
+
+  subroutine berry_get_jerk_klist(kpt,jerk_k_list)
+  !====================================================================!
+  !                                                                    !
+  !  Contribution from point k to the nonlinear jerk current
+  !  Explain !  
+  !====================================================================!
+
+    ! Arguments
+    !
+    use w90_constants, only      : dp,cmplx_0,cmplx_i
+    use w90_utility, only        : utility_re_tr,utility_im_tr,utility_w0gauss,utility_w0gauss_vec
+    use w90_parameters, only     : num_wann,nfermi,kubo_nfreq,kubo_freq_list,fermi_energy_list,&
+                                   kubo_smr_index,berry_kmesh,kubo_adpt_smr_fac,&
+                                   kubo_adpt_smr_max,kubo_adpt_smr,kubo_eigval_max,&
+                                   kubo_smr_fixed_en_width,sc_phase_conv,sc_w_thr
+    use w90_postw90_common, only : pw90common_fourier_R_to_k_vec_dadb, &
+                                   pw90common_fourier_R_to_k_new_second_d,pw90common_get_occ, &
+                                   pw90common_kmesh_spacing, pw90common_fourier_R_to_k_vec_dadb_TB_conv
+    use w90_wan_ham, only        : wham_get_eig_UU_HH_JJlist,wham_get_occ_mat_list,wham_get_D_h, &
+                                   wham_get_eig_UU_HH_AA_sc,wham_get_eig_deleig_massterm,wham_get_D_h_P_value,&
+                                   wham_get_eig_deleig_TB_conv,wham_get_eig_UU_HH_AA_sc_TB_conv 
+    use w90_get_oper, only       : AA_R
+    use w90_utility, only        : utility_rotate,utility_zdotu
+    ! Arguments
+    !
+    real(kind=dp), intent(in)                        :: kpt(3)
+    real(kind=dp), intent(out), dimension(:,:,:)     :: jerk_k_list
+
+    
+    complex(kind=dp), allocatable :: UU(:,:)
+    complex(kind=dp), allocatable :: AA(:,:,:), AA_bar(:,:,:)
+    complex(kind=dp), allocatable :: AA_da(:,:,:,:), AA_da_bar(:,:,:,:)
+    complex(kind=dp), allocatable :: HH_da(:,:,:), HH_da_bar(:,:,:)
+    complex(kind=dp), allocatable :: HH_dadb(:,:,:,:), HH_dadb_bar(:,:,:,:)
+    complex(kind=dp), allocatable :: HH(:,:)
+    complex(kind=dp), allocatable :: D_h(:,:,:)
+    real(kind=dp), allocatable    :: eig(:)
+    real(kind=dp), allocatable    :: eig_da(:,:)
+    real(kind=dp), allocatable    :: occ(:)
+
+    complex(kind=dp)              :: sum_AD(3,3), sum_HD(3,3),r_mn(3),gen_r_nm(3)
+    integer                       :: i,if,a,b,c,bc,n,m,r,ifreq,istart,iend
+    real(kind=dp)                 :: I_nm(3,6),& 
+                                     omega(kubo_nfreq),delta(kubo_nfreq),joint_level_spacing,&
+                                     eta_smr,Delta_k,arg,vdum(3),occ_fac,wstep,wmin,wmax
+
+    allocate(UU(num_wann,num_wann))
+    allocate(AA(num_wann,num_wann,3))
+    allocate(AA_bar(num_wann,num_wann,3))
+    allocate(AA_da(num_wann,num_wann,3,3))
+    allocate(AA_da_bar(num_wann,num_wann,3,3))
+    allocate(HH_da(num_wann,num_wann,3))
+    allocate(HH_da_bar(num_wann,num_wann,3))
+    allocate(HH_dadb(num_wann,num_wann,3,3))
+    allocate(HH_dadb_bar(num_wann,num_wann,3,3))
+    allocate(HH(num_wann,num_wann))
+    allocate(D_h(num_wann,num_wann,3))
+    allocate(eig(num_wann))
+    allocate(occ(num_wann))
+    allocate(eig_da(num_wann,3))
+
+    ! Initialize shift current array at point k
+    jerk_k_list   = 0.d0    
+
+    ! Gather W-gauge matrix objects !
+
+    ! get Hamiltonian and its first and second derivatives
+    ! Note that below we calculate the UU matrix--> we have to use the same UU from here on for 
+    ! maintaining the gauge-covariance of the whole matrix element
+    call wham_get_eig_UU_HH_AA_sc(kpt,eig,UU,HH,HH_da,HH_dadb)
+    ! get position operator and its derivative 
+    ! note that aa_da(:,:,a,b) \propto \sum_r exp(irk)*ir_{b}*<0|r_{a}|r> 
+    call pw90common_fourier_R_to_k_vec_dadb(kpt,AA_R,OO_da=AA,OO_dadb=AA_da)
+    ! get eigenvalues and their k-derivatives
+!    call wham_get_eig_deleig(kpt,eig,eig_da,HH,HH_da,UU)
+    call wham_get_eig_deleig_massterm(kpt,eig,eig_da,HH,HH_da,HH_dadb,UU)
+
+    ! get electronic occupations
+    call pw90common_get_occ(eig,occ,fermi_energy_list(1))
+
+    ! get D_h (Eq. (24) WYSV06)
+    call wham_get_D_h_P_value(HH_da,UU,eig,D_h)
+
+    ! calculate k-spacing in case of adaptive smearing
+    if(kubo_adpt_smr) Delta_k=pw90common_kmesh_spacing(berry_kmesh)
+
+    ! rotate quantities from W to H gauge (we follow wham_get_D_h for delHH_bar_i)
+    do a=1,3
+      ! Berry connection A
+      AA_bar(:,:,a)=utility_rotate(AA(:,:,a),UU,num_wann) 
+      ! first derivative of Hamiltonian dH_da
+      HH_da_bar(:,:,a)=utility_rotate(HH_da(:,:,a),UU,num_wann) 
+      do b=1,3
+        ! derivative of Berry connection dA_da
+        AA_da_bar(:,:,a,b)=utility_rotate(AA_da(:,:,a,b),UU,num_wann)
+        ! second derivative of Hamiltonian d^{2}H_dadb
+        HH_dadb_bar(:,:,a,b)=utility_rotate(HH_dadb(:,:,a,b),UU,num_wann)
+      enddo
+    enddo
+
+    ! setup for frequency-related quantities
+    omega=real(kubo_freq_list(:),dp)
+    wmin=omega(1)
+    wmax=omega(kubo_nfreq)
+    wstep=omega(2)-omega(1)
+
+    ! loop on initial and final bands
+    do n=1,num_wann
+      do m=1,num_wann
+        ! cycle diagonal matrix elements and bands above the maximum
+        if (n==m) cycle
+        if (eig(m)>kubo_eigval_max .or. eig(n)>kubo_eigval_max) cycle
+          ! setup T=0 occupation factors
+          occ_fac=(occ(n)-occ(m))
+          if (abs(occ_fac)<1e-10)  cycle
+
+          ! set delta function smearing 
+           if(kubo_adpt_smr) then
+            vdum(:)=eig_da(m,:)-eig_da(n,:)
+            joint_level_spacing=sqrt(dot_product(vdum(:),vdum(:)))*Delta_k
+            eta_smr=min(joint_level_spacing*kubo_adpt_smr_fac,&
+                kubo_adpt_smr_max)
+           else
+            eta_smr=kubo_smr_fixed_en_width
+           endif
+
+          ! restrict to energy window spanning [-sc_w_thr*eta_smr,+sc_w_thr*eta_smr] 
+          ! outside this range, the two delta functions are virtually zero 
+          if (  ((eig(n)-eig(m)+sc_w_thr*eta_smr<wmin).or.(eig(n)-eig(m)-sc_w_thr*eta_smr>wmax)) .and. & 
+                ((eig(m)-eig(n)+sc_w_thr*eta_smr<wmin).or.(eig(m)-eig(n)-sc_w_thr*eta_smr>wmax))   )  cycle
+
+          ! first compute the two sums over intermediate states between AA_bar and HH_da_bar with D_h
+          ! appearing in Eqs. (32) and (34) of IATS18  
+          sum_AD=cmplx_0
+          sum_HD=cmplx_0
+          do a=1,3
+            do c=1,3
+               ! Note that we substract diagonal elements in AA_bar and
+               ! HH_da_bar to match the convention in IATS18 
+               ! (diagonals in D_h are automatically zero, so we do not substract them)
+               sum_AD(c,a) =  (utility_zdotu(AA_bar(n,:,c),D_h(:,m,a)) - AA_bar(n,n,c)*D_h(n,m,a) ) &
+                             -(utility_zdotu(D_h(n,:,a),AA_bar(:,m,c)) - D_h(n,m,a)*AA_bar(m,m,c) )
+               sum_HD(c,a) =  (utility_zdotu(HH_da_bar(n,:,c),D_h(:,m,a)) - HH_da_bar(n,n,c)*D_h(n,m,a) ) &
+                             -(utility_zdotu(D_h(n,:,a),HH_da_bar(:,m,c)) - D_h(n,m,a)*HH_da_bar(m,m,c) )
+            enddo
+          enddo
+   
+          ! dipole matrix element 
+          r_mn(:) = AA_bar(m,n,:)+cmplx_i*D_h(m,n,:)
+
+          ! loop over direction of generalized derivative      
+          do a=1,3
+            ! store generalized derivative as an array on the additional spatial index,
+            ! its composed of 8 terms in total, see Eq (36) combined with (32) and
+            ! (34) of IATS18
+            gen_r_nm(:) = (     AA_da_bar(n,m,:,a)& 
+                                +( (AA_bar(n,n,:)-AA_bar(m,m,:))*D_h(n,m,a) + &
+                                 (AA_bar(n,n,a)-AA_bar(m,m,a))*D_h(n,m,:)) &
+                                -cmplx_i*AA_bar(n,m,:)*(AA_bar(n,n,a)-AA_bar(m,m,a))&
+                                +sum_AD(:,a)& 
+                                +cmplx_i*(HH_dadb_bar(n,m,:,a)&
+                                +sum_HD(:,a)& 
+                                +(D_h(n,m,:)*(eig_da(n,a)-eig_da(m,a)) + &
+                                  D_h(n,m,a)*(eig_da(n,:)-eig_da(m,:))  ) )&  
+                                 /(eig(m)-eig(n)) )
+
+            ! loop over the remaining two indexes of the matrix product. 
+            ! Note that shift current is symmetric under b <--> c exchange, 
+            ! so we avoid computing all combinations using alpha_S and beta_S
+            do bc=1,6
+              b=alpha_S(bc)
+              c=beta_S(bc) 
+              I_nm(a,bc) = imag(  r_mn(b) * gen_r_nm(c) + r_mn(c) * gen_r_nm(b) ) 
+            enddo ! bc
+          enddo ! a
+
+          ! compute delta(E_nm-w)
+          ! choose energy window spanning [-sc_w_thr*eta_smr,+sc_w_thr*eta_smr] 
+          istart=max(int( (eig(n)-eig(m)-sc_w_thr*eta_smr-wmin)/wstep+1 ),1)
+          iend=  min(int( (eig(n)-eig(m)+sc_w_thr*eta_smr-wmin)/wstep+1 ),kubo_nfreq)
+          ! multiply matrix elements with delta function for the relevant frequencies
+          if (istart<=iend) then
+              delta=0.0
+              delta(istart:iend)= &
+               utility_w0gauss_vec( (eig(m)-eig(n)+omega(istart:iend))/eta_smr,kubo_smr_index)/eta_smr 
+              call DGER(18,iend-istart+1,occ_fac,I_nm,1,delta(istart:iend),1,jerk_k_list(:,:,istart:iend),18)
+          endif
+          ! same for delta(E_mn-w)
+          istart=max(int( (eig(m)-eig(n)-sc_w_thr*eta_smr-wmin)/wstep+1 ),1)
+          iend=  min(int( (eig(m)-eig(n)+sc_w_thr*eta_smr-wmin)/wstep+1 ),kubo_nfreq)
+          if (istart<=iend) then
+              delta=0.0
+              delta(istart:iend)= &
+               utility_w0gauss_vec( (eig(n)-eig(m)+omega(istart:iend))/eta_smr,kubo_smr_index)/eta_smr 
+              call DGER(18,iend-istart+1,occ_fac,I_nm,1,delta(istart:iend),1,jerk_k_list(:,:,istart:iend),18)
+          endif
+
+        enddo ! bands
+      enddo ! bands
+
+  end subroutine berry_get_jerk_klist
+
+
+
 
 
   subroutine berry_get_sc_klist_2Dkslice(kpt,sc_k_list)
