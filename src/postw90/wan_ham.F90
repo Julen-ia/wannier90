@@ -23,7 +23,7 @@ module w90_wan_ham
 
   public :: wham_get_D_h, wham_get_eig_deleig, wham_get_eig_deleig_TB_conv, wham_get_D_h_P_value
   public :: wham_get_occ_mat_list, wham_get_eig_UU_HH_JJlist
-  public :: wham_get_eig_UU_HH_AA_sc, wham_get_eig_UU_HH_AA_sc_TB_conv 
+  public :: wham_get_eig_UU_HH_AA_sc, wham_get_eig_UU_HH_AA_sc_TB_conv, wham_get_eig_deleig_massterm 
 
   contains
 
@@ -409,17 +409,24 @@ module w90_wan_ham
     complex(kind=dp), dimension(:,:,:,:), intent(in)  :: deldelHH_ab
     complex(kind=dp), dimension(:,:), intent(in)  :: UU
 
+    real, parameter :: degen_thr_dk = 0.1 ! JULEN value taken from YWVS07,
+                                          ! eventually set as input variable
+                                          ! like degen_thr
+
     ! Misc/Dummy
     !
     integer                       :: alpha,beta,i,degen_min,degen_max,dim,& 
-                                     j,degen_min_dk,degen_max_dk,dim_dk
+                                     j,degen_min_dk,degen_max_dk,dim_dk,m_dum
     real(kind=dp)                 :: diff, diff_de
     complex(kind=dp), allocatable :: delHH_bar_a(:,:,:),deldelHH_bar_ab(:,:,:,:),U_deg(:,:)
 
     integer, allocatable          :: deg_band_grad_list(:,:)
+    complex(kind=dp), allocatable :: DH(:,:,:)
+
     allocate(delHH_bar_a(num_wann,num_wann,3))
     allocate(deldelHH_bar_ab(num_wann,num_wann,3,3))
     allocate(U_deg(num_wann,num_wann))
+    allocate(DH(num_wann,num_wann,3))
     ! this array contains information about degenerate band gradients
     ! initialize all band indexes with 0 (the degenerate ones will be assigned 1
     ! afterwards)
@@ -500,9 +507,9 @@ module w90_wan_ham
                   !
                   ! j is the highest band in the first derivative degenerate subspace, and it is non-degenerate
                   !
-                    diff_de =degen_thr+1.0_dp ! JULEN need to specify a different threshold?
+                    diff_de =degen_thr_dk+1.0_dp ! JULEN need to specify a different threshold?
                   end if
-                  if(diff_de<degen_thr) then
+                  if(diff_de<degen_thr_dk) then
                      !
                      ! Band gradients j and j+1 are degenerate 
                      !
@@ -513,7 +520,7 @@ module w90_wan_ham
                      !
                      do
                         if(degen_max_dk+1>degen_max) exit
-                        diff_de=deleig_a(degen_max_dk+1)-deleig_a(degen_max_dk)
+                        diff_de=deleig_a(degen_max_dk+1,alpha)-deleig_a(degen_max_dk,alpha)
                         if(diff_de<degen_thr) then
                            degen_max_dk=degen_max_dk+1
                         else
@@ -528,6 +535,11 @@ module w90_wan_ham
                      ! Scanned band gradients up to degen_max_dk
                      j=degen_max_dk
 
+                  else ! band gradient not degenerate, dont do anything
+                     cycle
+                  end if
+
+               end do 
 
                !!!!!!!!!!!!!!!!!!!!!!!!!! 
 
@@ -550,41 +562,53 @@ module w90_wan_ham
  
     end do ! spatial index for first derivative
 
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    ! now compute the effective mass term
+ 
+    ! start by getting D^H (Eq. (24) WYSV06)
+    call wham_get_D_h_P_value(delHH_a,UU,eig,DH)
 
-!    ! now compute the effective mass term
-!    ! loop on two spatial indexes
-!    
-!
-!    do i=1,num_wann
-!
-!     ! check if the band-gradients are degenerate
-!
-!     if (deg_band_grad_list(i).eq.0) then
-!     ! non-degenerate, compute Eq (28) of YWVS07 for band i
-! 
-!      
-! 
-!
-!     end if
-!    ! loop again for the effective mass term
-!                       ! Band gradients from degen_min_dk to degen_max_dk are degenerate. Diagonalize 
-!                   ! the submatrix in Eq.(28) YWVS07 with the n,n band indices replaced by 
-!                   ! mu,nu band indices corresponding to this degenerate subspace, see discussion below 
-!                   ! Eq (32)  YWVS07.
-!                   ! The eigenvalues are the second band gradients
-!                   !
-!                   !
-!                   dim_dk=degen_max_dk-degen_min_dk+1
-!                   call utility_diagonalize(delHH_bar_a(degen_min:degen_max,&
-!                        degen_min:degen_max),dim,&
-!                        deleig_a(degen_min:degen_max),U_deg(1:dim,1:dim))
-!                   !
-!    end do
-  
+    ! loop on two spatial indexes 
+    do alpha = 1,3
+      do beta = 1,3
+
+        ! rotate second derivative of H to Hamiltonian gauge
+        deldelHH_bar_ab(:,:,alpha,beta)=utility_rotate(deldelHH_ab(:,:,alpha,beta),UU,num_wann)
+        ! loop on bands (diagonal)
+        do i=1,num_wann
+
+         ! check if the band-gradients are degenerate
+         ! JULEN note that we need to check in two spatial indexes, since there
+         ! are two first-order Hamiltonian derivatives entering the mass-term formula
+         ! that can be degenerate
+         if ( (deg_band_grad_list(i,alpha).eq.0).and.((deg_band_grad_list(i,beta).eq.0)) ) then
+         ! non-degenerate, compute Eq (28) of YWVS07 for band i
+     
+           ! add second derivative
+           mu_mass_ab(i,alpha,beta) = deldelHH_bar_ab(i,i,alpha,beta)          
+           ! loop on dummy band index for the contribution in the curly brackets
+           do m_dum=1, num_wann   
+              mu_mass_ab(i,alpha,beta) = mu_mass_ab(i,alpha,beta) + &
+                                         delHH_bar_a(i,m_dum,alpha)*DH(m_dum,i,beta) + & 
+                                         DH(i,m_dum,beta)*delHH_bar_a(m_dum,i,alpha) 
+           end do
+
+         end if
+        ! loop again for the effective mass term
+                           ! Band gradients from degen_min_dk to degen_max_dk are degenerate. Diagonalize 
+                       ! the submatrix in Eq.(28) YWVS07 with the n,n band indices replaced by 
+                       ! mu,nu band indices corresponding to this degenerate subspace, see discussion below 
+                       ! Eq (32)  YWVS07.
+                       ! The eigenvalues are the second band gradients
+                       !
+                       !
+        end do
+      end do
+    end do  
     
   end subroutine wham_get_deleig_a_b
 
-  subroutine wham_get_eig_deleig_massterm(kpt,eig,del_eig,HH,delHH,deldelHH,UU)
+  subroutine wham_get_eig_deleig_massterm(kpt,eig,del_eig,mu_mass,HH,delHH,deldelHH,UU)
     !! Given a k point, this function returns eigenvalues E,
     !! derivatives of the eigenvalues dE/dk_a, 
     !  and second derivatives of the eigenvalues d^{2}E/dk_a.dk_b 
@@ -592,7 +616,7 @@ module w90_wan_ham
     !
     use w90_parameters, only: num_wann
     use w90_get_oper, only: HH_R, get_HH_R
-    use w90_postw90_common, only : pw90common_fourier_R_to_k
+    use w90_postw90_common, only : pw90common_fourier_R_to_k_new_second_d
     use w90_utility, only : utility_diagonalize
 
     real(kind=dp), dimension(3), intent(in)         :: kpt

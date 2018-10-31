@@ -1535,6 +1535,7 @@ module w90_berry
     complex(kind=dp), allocatable :: D_h(:,:,:)
     real(kind=dp), allocatable    :: eig(:)
     real(kind=dp), allocatable    :: eig_da(:,:)
+    real(kind=dp), allocatable    :: mu_mass(:,:,:)
     real(kind=dp), allocatable    :: occ(:)
 
     complex(kind=dp)              :: sum_AD(3,3), sum_HD(3,3),r_mn(3),gen_r_nm(3)
@@ -1557,6 +1558,7 @@ module w90_berry
     allocate(eig(num_wann))
     allocate(occ(num_wann))
     allocate(eig_da(num_wann,3))
+    allocate(mu_mass(num_wann,3,3))
 
     ! Initialize shift current array at point k
     jerk_k_list   = 0.d0    
@@ -1572,7 +1574,7 @@ module w90_berry
     call pw90common_fourier_R_to_k_vec_dadb(kpt,AA_R,OO_da=AA,OO_dadb=AA_da)
     ! get eigenvalues and their k-derivatives
 !    call wham_get_eig_deleig(kpt,eig,eig_da,HH,HH_da,UU)
-    call wham_get_eig_deleig_massterm(kpt,eig,eig_da,HH,HH_da,HH_dadb,UU)
+    call wham_get_eig_deleig_massterm(kpt,eig,eig_da,mu_mass,HH,HH_da,HH_dadb,UU)
 
     ! get electronic occupations
     call pw90common_get_occ(eig,occ,fermi_energy_list(1))
